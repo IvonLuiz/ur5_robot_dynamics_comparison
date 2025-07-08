@@ -9,7 +9,7 @@ def compare_models(tau, custom_model: UR5DynamicModel, sol_custom, rtb_robot: DH
     """
     Compares custom UR5 model simulation with Robotics Toolbox.
 
-    Simulates both models under identical conditions (zero gravity, constant torque)
+    Simulates both models under identical conditions (constant torque)
     and plots joint positions and velocities, saving them to a 'results' folder.
 
     \param tau: Torque input for the simulation
@@ -37,13 +37,6 @@ def compare_models(tau, custom_model: UR5DynamicModel, sol_custom, rtb_robot: DH
         link.I = np.diag([Ix, Iy, Iz])  # Convert to diagonal inertia matrix
         link.B = custom_model.B
 
-    print("RTB model with parameters:")
-    for i, link in enumerate(rtb_robot.links):
-        print(f"Link {i+1}: m={link.m}, r={link.r}, I={link.I}")
-    print("Custom model parameters:")
-    for i in range(len(custom_model.I)):
-        print(f"Link {i+1}: m={custom_model.mass[i]}, r={custom_model.r[i]}, I={custom_model.I[i]}")
-
     def Q_rtb(robot_instance: DHRobot, t: float, q_val: np.ndarray, qd_val: np.ndarray) -> np.ndarray:
         return tau
 
@@ -62,8 +55,6 @@ def compare_models(tau, custom_model: UR5DynamicModel, sol_custom, rtb_robot: DH
     for k, (custom_data, rtb_data) in enumerate(
         [(q_custom, q_rtb), (qd_custom, qd_rtb)]
     ):
-        print(custom_data.shape, rtb_data.shape)
-        print(t_span.shape, t_rtb.shape)
         fig, axes = plt.subplots(3, 2, figsize=(15, 12))
         axes = axes.flatten()
 
@@ -86,6 +77,7 @@ def compare_models(tau, custom_model: UR5DynamicModel, sol_custom, rtb_robot: DH
 
         filepath = os.path.join(results_dir, plot_filenames[k])
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.show()
         plt.close(fig)
 
     print("\nPlotting complete. Figures saved to the 'results' folder.")
@@ -100,4 +92,3 @@ def compare_models(tau, custom_model: UR5DynamicModel, sol_custom, rtb_robot: DH
     rms_error_final_q = np.sqrt(np.mean(err_final_q ** 2))
     print(f"\nRMS Error of Final Joint Positions: {rms_error_final_q:.6e} rad")
     
-    print("\nNote: Small discrepancies are expected due to differing internal solvers/precision.")
