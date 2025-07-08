@@ -36,14 +36,14 @@ class UR5DynamicModel:
         # Denavit-Hartenberg (DH) Parameters [a, d, alpha, theta_offset]
         self.dh_params = [
             [0, 0.089159, 0, np.pi / 2],
-            [-0.425, 0, -0.425, 0],
-            [-0.39225, 0, -0.39225, 0],
+            [0, 0, -0.425, 0],
+            [0, 0, -0.39225, 0],
             [0, 0.10915, 0, np.pi / 2],
             [0, 0.09465, 0, -np.pi / 2],
             [0, 0.0823, 0, 0],
         ]
 
-        self.B = 0.00 # Viscous friction coefficient (N.m.s/rad)
+        self.B = 0.05 # Viscous friction coefficient (N.m.s/rad)
 
     def forward_kinematics(self, q):
         '''!
@@ -223,10 +223,6 @@ class UR5DynamicModel:
         y0 = np.concatenate((q0, qd0))
         self.verbose = verbose
        
-        num_steps = len(t_span)
-        q_log   = np.zeros((num_steps, 6))
-        qd_log  = np.zeros((num_steps, 6)) 
-
         def dynamics_with_logging(t, y, tau):
             '''!
             ODE function to compute the dynamics with logging.
@@ -257,45 +253,21 @@ class UR5DynamicModel:
         if self.verbose:
             print("...")
             print("Integrating dynamics using solve_ivp...")
-        solve_direct = True
-        if solve_direct:
-            sol = solve_ivp(
-                dynamics_with_logging,
-                [t_span[0], t_span[-1]],
-                y0,
-                t_eval=t_span,
-                args=(tau,),
-                method='RK45',
-                rtol=1e-6,
-                atol=1e-8
-            )
-            return np.hstack([sol.y[:6, :].T, sol.y[6:, :].T])
-        
-        y_curr = y0.copy()
 
-        for i, t_eval_end in enumerate(t_span):
-            if i == 0:
-                q_at_t = y0[:6]
-                qd_at_t = y0[6:]
-            else:
-                sol = solve_ivp(
-                    dynamics_with_logging,
-                    [t_span[i-1], t_eval_end],
-                    y_curr,
-                    args=(tau,),
-                    method='RK45',
-                    rtol=1e-6,
-                    atol=1e-8
-                )
-                y_curr = sol.y[:, -1]
-                q_at_t = y_curr[:6]
-                qd_at_t = y_curr[6:]
-            q_log[i] = q_at_t
-            qd_log[i] = qd_at_t
+        sol = solve_ivp(
+            dynamics_with_logging,
+            [t_span[0], t_span[-1]],
+            y0,
+            t_eval=t_span,
+            args=(tau,),
+            method='RK45',
+            rtol=1e-6,
+            atol=1e-8
+        )
             
         if self.verbose:
             print("\n Simulation completed!")
-        return np.hstack([q_log, qd_log])
+        return np.hstack([sol.y[:6, :].T, sol.y[6:, :].T])
 
 if __name__ == "__main__":
     ur5_model = UR5DynamicModel()
