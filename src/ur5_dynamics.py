@@ -1,12 +1,16 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from roboticstoolbox import DHRobot, RevoluteDH
+from scipy.integrate import solve_ivp
 from spatialmath import SE3
 from scipy.integrate import odeint
 from spatialmath.base import trotz, transl
 
 class UR5DynamicModel:
     def __init__(self, verbose=True):
+        '''!
+        Initializes the UR5 dynamic model with parameters for mass, inertia, DH parameters, and gravity.
+        Information about the UR5 robot's kinematic and dynamic parameters can be found at:
+        www.universal-robots.com/articles/ur/application-installation/dh-parameters-for-calculations-of-kinematics-and-dynamics/
+        '''
         # Center of mass of each link in its local frame (m)
         self.mass = np.array([3.7, 8.393, 2.33, 1.219, 1.219, 0.1879]) # Mass (kg)
         # Center of mass of each link in its local frame (m)
@@ -32,20 +36,14 @@ class UR5DynamicModel:
         # Denavit-Hartenberg (DH) Parameters [a, d, alpha, theta_offset]
         self.dh_params = [
             [0, 0.089159, 0, np.pi / 2],
-            [0, 0, -0.425, 0],
-            [0, 0, -0.39225, 0],
+            [-0.425, 0, -0.425, 0],
+            [-0.39225, 0, -0.39225, 0],
             [0, 0.10915, 0, np.pi / 2],
             [0, 0.09465, 0, -np.pi / 2],
             [0, 0.0823, 0, 0],
         ]
 
-        self.l = [0.425, 0.392, 0.1, 0.1, 0.1, 0.1]  # lengths (m)
-
-        # Joint limits
-        self.tau_max = np.array([150, 150, 150, 28, 28, 28]) # (Nm)
-        
-        # Option to enable/disable logging
-        self.verbose = verbose
+        self.B = 0.00 # Viscous friction coefficient (N.m.s/rad)
 
     def forward_kinematics(self, q):
         '''!
@@ -66,15 +64,16 @@ class UR5DynamicModel:
             T.append(current_T)
         
         return T
-    
-    def jacobian(self, q):
+
+    def jacobian(self, q, T=None):
         '''!
         Calculates the Jacobian for each center of mass.
         
         \param   q (np.ndarray): Joint positions (radians).
         \return  List[Tuple[np.ndarray, np.ndarray]]: List of tuples containing linear and angular Jacobians for each link.
         '''
-        T = self.forward_kinematics(q)
+        if T is None:
+            T = self.forward_kinematics(q)
         J = []
         
         for i in range(6):
@@ -99,20 +98,26 @@ class UR5DynamicModel:
 
         return J
     
-    def inertia_matrix(self, q):
+
+    def inertia_matrix(self, q, T=None, J=None):
         '''!
         Calculates the manipulator's inertia matrix D(q) in joint space.
 
         \param   q (np.ndarray): Joint positions (radians).
+        \param   T (List[SE3], optional): Pre-computed forward kinematics transforms.
+        \param   J (List[Tuple[np.ndarray, np.ndarray]], optional): Pre-computed Jacobians.
         \return  np.ndarray: The 6x6 inertia matrix (D).
         '''
-        J = self.jacobian(q)
+        if T is None:
+            T = self.forward_kinematics(q)
+        if J is None:
+            J = self.jacobian(q, T)
         D = np.zeros((6, 6))
         
         for i in range(6):
             Jv_i, Jw_i = J[i]
-            R_i = self.forward_kinematics(q)[i].R
-            
+            R_i = T[i].R
+
             # Inertia tensor on global frame
             I_global = R_i @ np.diag(self.I[i]) @ R_i.T
 
@@ -120,7 +125,7 @@ class UR5DynamicModel:
 
         return D
 
-    def coriolis_matrix(self, q, qd):
+    def coriolis_matrix(self, q, qd, D=None):
         '''!
         Calculates the Coriolis and centrifugal forces matrix C(q, qd).
 
@@ -129,7 +134,8 @@ class UR5DynamicModel:
         \param   D (np.ndarray, optional): Pre-calculated inertia matrix D(q).
         \return  np.ndarray: The 6x6 Coriolis matrix (C).
         '''
-        D = self.inertia_matrix(q)
+        if D is None:
+            D = self.inertia_matrix(q)
         C = np.zeros((6, 6))
         h = 1e-6
 
@@ -159,34 +165,37 @@ class UR5DynamicModel:
         
         return C
     
-    def gravity_vector(self, q):
+    def gravity_vector(self, q, T=None):
         '''!
         Calculates the gravity force vector G(q) in joint space.
 
         \param   q (np.ndarray): Joint positions (radians).
+        \param   T (List[SE3], optional): Pre-computed forward kinematics transforms.
         \return  np.ndarray: The 6x1 gravity force vector (G).
         '''
-        T = self.forward_kinematics(q)
+        if T is None:
+            T = self.forward_kinematics(q)
         G = np.zeros(6)
+        h = 1e-6
         
+        # Calculate total potential energy at q
+        P_q = 0.0
         for i in range(6):
-            # Posição do centro de massa no frame global
-            com_global = T[i] * SE3(transl(self.r[i]))
+            p_com = (T[i] * SE3(transl(self.r[i]))).t
+            P_q += self.mass[i] * np.dot(self.gravity, p_com)
+        
+        # Calculate numerical gradient
+        for j in range(6):
+            q_plus = q.copy()
+            q_plus[j] += h
+            T_plus = self.forward_kinematics(q_plus)
             
-            # Energia potencial
-            P = self.mass[i] * self.gravity @ com_global.t
+            P_plus = 0.0
+            for i in range(6):
+                p_com_plus = (T_plus[i] * SE3(transl(self.r[i]))).t
+                P_plus += self.mass[i] * np.dot(self.gravity, p_com_plus)
             
-            # Gradiente da energia potencial
-            for j in range(6):
-                # Aproximação numérica do gradiente
-                epsilon = 1e-6
-                q_plus = q.copy()
-                q_plus[j] += epsilon
-                T_plus = self.forward_kinematics(q_plus)
-                com_plus = T_plus[i] * SE3(transl(self.r[i]))
-                P_plus = self.mass[i] * self.gravity @ com_plus.t
-                
-                G[j] += (P_plus - P) / epsilon
+            G[j] = (P_plus - P_q) / h
         
         return G
     
@@ -197,9 +206,9 @@ class UR5DynamicModel:
         \param   qd (np.ndarray): Joint velocities (radians/s).
         \return  np.ndarray: The 6x1 friction force vector.
         '''
-        return 0.05 * qd
-    
-    def simulate(self, q0, qd0, tau, t_span, verbose=False):
+        return self.B * qd
+
+    def simulate(self, q0, qd0, tau, t_span, verbose=True):
         '''!
         Simulates the robot dynamics using numerical integration with optional logging.
         
@@ -207,14 +216,18 @@ class UR5DynamicModel:
         \param   qd0 (np.ndarray): Initial joint velocities (radians/s).
         \param   tau (np.ndarray): Joint torques (Nm).
         \param   t_span (np.ndarray): Time span for the simulation (seconds).
+        \param   integration_method (str): 'odeint' or 'solve_ivp' for numerical integration.
         \param   verbose (bool): If True, prints simulation progress.
         \return  np.ndarray: The state trajectory [q, qd] over time.
         '''
         y0 = np.concatenate((q0, qd0))
-        cache = {'last_q': None, 'last_D': None, 'last_C': None, 'last_G': None}
         self.verbose = verbose
-        
-        def dynamics_with_logging(y, t, tau):
+       
+        num_steps = len(t_span)
+        q_log   = np.zeros((num_steps, 6))
+        qd_log  = np.zeros((num_steps, 6)) 
+
+        def dynamics_with_logging(t, y, tau):
             '''!
             ODE function to compute the dynamics with logging.
             dy/dt = [qd, qdd]
@@ -226,38 +239,63 @@ class UR5DynamicModel:
             '''
             q = y[:6]
             qd = y[6:]
+
             if self.verbose:
                 print(f"\rSimulating t = {t:.2f}s", end='', flush=True)
-            if cache['last_q'] is None or np.any(np.abs(q - cache['last_q']) > 1e-6):
-                D = self.inertia_matrix(q)
-                C = self.coriolis_matrix(q, qd)
-                G = self.gravity_vector(q)
-                cache.update({'last_q': q.copy(), 'last_D': D, 'last_C': C, 'last_G': G})
-            else:
-                D, C, G = cache['last_D'], cache['last_C'], cache['last_G']
+            
+            T = self.forward_kinematics(q)
+            J = self.jacobian(q, T)
+            D = self.inertia_matrix(q, T, J)
+            C = self.coriolis_matrix(q, qd, D)
+            G = self.gravity_vector(q, T)
             F = self.friction(qd)
+            # D*qdd = tau - C*qd - G - F_friction
             qdd = np.linalg.solve(D, (tau - C @ qd - G - F))
+            
             return np.concatenate((qd, qdd))
         
         if self.verbose:
             print("...")
-        try:
-            sol = odeint(
+            print("Integrating dynamics using solve_ivp...")
+        solve_direct = True
+        if solve_direct:
+            sol = solve_ivp(
                 dynamics_with_logging,
+                [t_span[0], t_span[-1]],
                 y0,
-                t_span,
+                t_eval=t_span,
                 args=(tau,),
+                method='RK45',
                 rtol=1e-6,
-                atol=1e-8,
-                mxstep=1000
+                atol=1e-8
             )
-            if self.verbose:
-                print("\nSimulação concluída com sucesso!")
-            return sol
-        except Exception as e:
-            print(f"\nErro durante a integração: {str(e)}")
-            raise
+            return np.hstack([sol.y[:6, :].T, sol.y[6:, :].T])
+        
+        y_curr = y0.copy()
 
+        for i, t_eval_end in enumerate(t_span):
+            if i == 0:
+                q_at_t = y0[:6]
+                qd_at_t = y0[6:]
+            else:
+                sol = solve_ivp(
+                    dynamics_with_logging,
+                    [t_span[i-1], t_eval_end],
+                    y_curr,
+                    args=(tau,),
+                    method='RK45',
+                    rtol=1e-6,
+                    atol=1e-8
+                )
+                y_curr = sol.y[:, -1]
+                q_at_t = y_curr[:6]
+                qd_at_t = y_curr[6:]
+            q_log[i] = q_at_t
+            qd_log[i] = qd_at_t
+            
+        if self.verbose:
+            print("\n Simulation completed!")
+        return np.hstack([q_log, qd_log])
 
 if __name__ == "__main__":
     ur5_model = UR5DynamicModel()
